@@ -46,6 +46,7 @@ class NoiselessBackwardFK:
         mean_obs = Kn * np.sqrt(alpha_n) * self.y
         cov_obs = (1 - alpha_n) * Kn * np.eye(self.dy)
         particles[:, self.obs_idx] = np.random.multivariate_normal(mean_obs, cov_obs, size=N)
+        # mauvais changement truc non obs
         particles[:, self.miss_idx] = np.random.randn(N, len(self.miss_idx))
         return particles
 
@@ -55,6 +56,7 @@ class NoiselessBackwardFK:
         sigma_sp1 = self.sigmas[s + 1]
         Ks = sigma_sp1**2 / (sigma_sp1**2 + 1 - alpha_s)
         cov_obs = (1 - alpha_s) * Ks * np.eye(self.dy)
+        #manque carré
         new_obs = np.array([np.random.multivariate_normal(mean=m[self.obs_idx], cov=cov_obs) for m in mean])
         xp_new = xp.copy()
         xp_new[:, self.obs_idx] = new_obs
@@ -77,6 +79,7 @@ class PseudoSMC:
         for i in range(self.N):
             diff = np.sqrt(self.fk.alpha_bars[s]) * self.fk.y - mean[i, self.fk.obs_idx]
             log_w[i] = -0.5 * diff @ diff / cov - 0.5 * self.fk.dy * np.log(2 * np.pi * cov)
+        # mauvais poids
         log_w -= np.max(log_w)
         w = np.exp(log_w)
         if np.sum(w) == 0 or np.isnan(np.sum(w)):
