@@ -1,11 +1,12 @@
-import numpy as np
-import torch 
-import os
+import torch
 import matplotlib.pyplot as plt
-
+import numpy as np
+import os
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
+
+# --- Backward FK ---
 class NoiselessBackwardFK:
     def __init__(self, y, obs_idx, miss_idx, alpha_bars, sigmas, model, dx):
         self.y = y
@@ -17,6 +18,7 @@ class NoiselessBackwardFK:
         self.model = model
         self.dx = dx
         self.nsteps = len(alpha_bars) - 1
+        
 
     @torch.no_grad()
     def chi(self, x, t):
@@ -25,10 +27,13 @@ class NoiselessBackwardFK:
         img_size = int(np.sqrt(self.dx))
         x_img = x.reshape(N, 1, img_size, img_size)
         x_tensor = torch.tensor(x_img, dtype=torch.float32, device=device)
-        t_tensor = torch.full((N,), t, device=device, dtype=torch.long)
+        t_model = self.model.scheduler.timesteps[t]  
+        t_tensor = torch.full((N,), t_model, device=device, dtype=torch.long)
         eps = self.model(x_tensor, t_tensor).cpu().numpy().reshape(N, -1)
-        return x / np.sqrt(self.alpha_bars[t]) - np.sqrt(1 - self.alpha_bars[t]) * eps
-
+        alpha_bar_t = self.alpha_bars[t]
+        chi = x / np.sqrt(alpha_bar_t) - np.sqrt(1 - alpha_bar_t) * eps
+        return chi
+    
     def m(self, x_next, t):
         chi = self.chi(x_next, t + 1)
         sigma2 = self.sigmas[t + 1]**2
@@ -44,9 +49,8 @@ class NoiselessBackwardFK:
         sigma_n = self.sigmas[-1]
         Kn = sigma_n**2 / (sigma_n**2 + 1 - alpha_n)
         mean_obs = Kn * np.sqrt(alpha_n) * self.y
-        cov_obs = (1 - alpha_n) * Kn * np.eye(self.dy)
+        cov_obs = (((1 - alpha_n) * Kn)**2) * np.eye(self.dy)
         particles[:, self.obs_idx] = np.random.multivariate_normal(mean_obs, cov_obs, size=N)
-        # mauvais changement truc non obs
         particles[:, self.miss_idx] = np.random.randn(N, len(self.miss_idx))
         return particles
 
@@ -56,21 +60,25 @@ class NoiselessBackwardFK:
         sigma_sp1 = self.sigmas[s + 1]
         Ks = sigma_sp1**2 / (sigma_sp1**2 + 1 - alpha_s)
         cov_obs = (1 - alpha_s) * Ks * np.eye(self.dy)
-        #manque carré
         new_obs = np.array([np.random.multivariate_normal(mean=m[self.obs_idx], cov=cov_obs) for m in mean])
         xp_new = xp.copy()
         xp_new[:, self.obs_idx] = new_obs
+
+        # test
+        xp_new[:, self.miss_idx] = (
+                mean[:, self.miss_idx]
+                + sigma_sp1 * np.random.randn(len(xp_new), len(self.miss_idx))
+            )
         return xp_new
-    
 
 
+# --- PseudoSMC with snapshot saving ---
 class PseudoSMC:
-    def __init__(self, fk, N=5, snapshot_dir :str |None = None):
+    def __init__(self, fk, N=5, snapshot_dir="./manual_smc_res"):
         self.fk = fk
         self.N = N
-        if snapshot_dir:
-            self.snapshot_dir = snapshot_dir
-            os.makedirs(snapshot_dir, exist_ok=True)
+        self.snapshot_dir = snapshot_dir
+        os.makedirs(snapshot_dir, exist_ok=True)
 
     def compute_weights(self, particles, s):
         mean = self.fk.m(particles, s)
@@ -79,7 +87,6 @@ class PseudoSMC:
         for i in range(self.N):
             diff = np.sqrt(self.fk.alpha_bars[s]) * self.fk.y - mean[i, self.fk.obs_idx]
             log_w[i] = -0.5 * diff @ diff / cov - 0.5 * self.fk.dy * np.log(2 * np.pi * cov)
-        # mauvais poids
         log_w -= np.max(log_w)
         w = np.exp(log_w)
         if np.sum(w) == 0 or np.isnan(np.sum(w)):
@@ -92,11 +99,12 @@ class PseudoSMC:
 
     def run(self, snapshot_every=5):
         particles = self.fk.M0(self.N)
-        for s in reversed(range(self.fk.nsteps)):
+
+        for s in reversed(range(200)):
             w = self.compute_weights(particles, s)
             particles = self.resample(particles, w)
             particles = self.fk.M(s, particles)
-            if self.snapshot_dir and s % snapshot_every == 0:
+            if s % snapshot_every == 0:
                 is_valid = np.all(np.isfinite(particles), axis=1)
                 n_valid = np.sum(is_valid)
                 n_degen = self.N - n_valid
